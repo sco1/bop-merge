@@ -28,7 +28,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
           rustup default stable
 
       - name: Cache cargo registry and build artifacts
@@ -37,7 +38,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: cargo +nightly fmt --all --check
 
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings

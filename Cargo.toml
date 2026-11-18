@@ -1,0 +1,15 @@
+[package]
+name = "bop-merge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+dotenvy = "0.15.7"
+httparse = "1.10.1"
+rand = "0.10.4"
+reqwest = { version = "0.13.5", features = ["blocking", "form", "json"] }
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.1"
+url = "2.5.8"

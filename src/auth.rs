@@ -1,9 +1,13 @@
+mod callback;
 mod pkce;
 
 use rand::distr::{Alphanumeric, SampleString};
 use url::Url;
 
-pub use crate::auth::pkce::Pkce;
+pub use crate::auth::{
+    callback::{bind_callback, wait_for_callback},
+    pkce::Pkce,
+};
 
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.spotify.com/authorize";
 pub const REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";

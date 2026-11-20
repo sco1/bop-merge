@@ -135,3 +135,110 @@ fn select_filters_a_mixed_library() {
 fn select_empty_input() {
     assert!(select_sources(Vec::new(), ME).is_empty());
 }
+
+fn item(kind: &str, uri: &str, is_local: bool) -> PlaylistItem {
+    PlaylistItem {
+        is_local,
+        item: Some(ItemRef {
+            kind: kind.to_owned(),
+            uri: uri.to_owned(),
+        }),
+    }
+}
+
+fn track(id: &str) -> PlaylistItem {
+    item("track", &format!("{TRACK_URI_PREFIX}{id}"), false)
+}
+
+fn expected(uris: &[&str], n_skipped: usize) -> TrackUris {
+    TrackUris {
+        uris: uris.iter().map(|u| (*u).to_owned()).collect(),
+        n_skipped,
+    }
+}
+
+#[test]
+fn track_uris_empty_input() {
+    assert_eq!(track_uris(Vec::new()), TrackUris::default());
+}
+
+#[test]
+fn track_uris_keeps_track() {
+    assert_eq!(
+        track_uris(vec![track("a")]),
+        expected(&["spotify:track:a"], 0)
+    );
+}
+
+#[test]
+fn track_uris_skips_local_file() {
+    let local = item("track", "spotify:local:Artist:Album:Song:180", true);
+    assert_eq!(track_uris(vec![local]), expected(&[], 1));
+}
+
+#[test]
+fn track_uris_skips_local_flag_even_with_track_uri() {
+    // `is_local` alone is enough to skip, whatever the URI looks like.
+    let local = item("track", "spotify:track:a", true);
+    assert_eq!(track_uris(vec![local]), expected(&[], 1));
+}
+
+#[test]
+fn track_uris_skips_missing_item() {
+    let missing = PlaylistItem {
+        is_local: false,
+        item: None,
+    };
+    assert_eq!(track_uris(vec![missing]), expected(&[], 1));
+}
+
+#[test]
+fn track_uris_skips_episode() {
+    let episode = item("episode", "spotify:episode:e", false);
+    assert_eq!(track_uris(vec![episode]), expected(&[], 1));
+}
+
+#[test]
+fn track_uris_skips_kind_uri_mismatch() {
+    let items = vec![
+        item("track", "spotify:episode:e", false),
+        item("episode", "spotify:track:a", false),
+    ];
+    assert_eq!(track_uris(items), expected(&[], 2));
+}
+
+#[test]
+fn track_uris_keeps_duplicates() {
+    // Dedupe is plan()'s job, not this function's.
+    assert_eq!(
+        track_uris(vec![track("a"), track("a")]),
+        expected(&["spotify:track:a", "spotify:track:a"], 0)
+    );
+}
+
+#[test]
+fn track_uris_filters_a_mixed_playlist_in_order() {
+    let items = vec![
+        track("a"),
+        item("track", "spotify:local:Artist:Album:Song:180", true),
+        track("b"),
+        item("episode", "spotify:episode:e", false),
+        PlaylistItem {
+            is_local: false,
+            item: None,
+        },
+        track("c"),
+    ];
+    let n_items = items.len();
+
+    let result = track_uris(items);
+
+    assert_eq!(
+        result,
+        expected(
+            &["spotify:track:a", "spotify:track:b", "spotify:track:c"],
+            3
+        )
+    );
+    assert_eq!(result.uris.len() + result.n_skipped, n_items);
+}

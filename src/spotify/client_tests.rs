@@ -294,3 +294,137 @@ fn my_playlists_rejects_next_on_another_host() {
     assert!(msg.contains("example.invalid"), "{msg}");
     assert_eq!(requests.len(), 1);
 }
+
+// --- playlist items ---
+
+const ITEMS_FIELDS: &str = "items(is_local,item(type,uri)),next";
+
+fn item_json(kind: &str, uri: &str, is_local: bool) -> String {
+    format!(r#"{{"is_local":{is_local},"item":{{"type":"{kind}","uri":"{uri}"}}}}"#)
+}
+
+/// Decoded query pairs of a received request path, so assertions don't depend on percent-encoding.
+fn query_pairs(path: &str) -> Vec<(String, String)> {
+    Url::parse(&format!("http://127.0.0.1{path}"))
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect()
+}
+
+#[test]
+fn playlist_items_sends_path_and_query() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let page = format!(
+        r#"{{"items":[{}],"next":null}}"#,
+        item_json("track", "spotify:track:a", false)
+    );
+    let handle = server.serve(vec![Reply::new("200 OK", page)]);
+
+    client.playlist_items("abc").unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 1);
+    let (path, _) = requests[0].path.split_once('?').unwrap();
+    assert_eq!(path, "/v1/playlists/abc/items");
+    assert_eq!(
+        query_pairs(&requests[0].path),
+        [
+            ("limit".to_owned(), "50".to_owned()),
+            ("fields".to_owned(), ITEMS_FIELDS.to_owned()),
+        ]
+    );
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer test-token")
+    );
+}
+
+#[test]
+fn playlist_items_follows_next() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let page1 = format!(
+        r#"{{"items":[{},{}],"next":"{}/v1/playlists/abc/items?offset=2&limit=2"}}"#,
+        item_json("track", "spotify:track:a", false),
+        item_json("track", "spotify:track:b", false),
+        server.base()
+    );
+    let page2 = format!(
+        r#"{{"items":[{}],"next":null}}"#,
+        item_json("track", "spotify:track:c", false)
+    );
+    let handle = server.serve(vec![
+        Reply::new("200 OK", page1),
+        Reply::new("200 OK", page2),
+    ]);
+
+    let items = client.playlist_items("abc").unwrap();
+    let requests = handle.join().unwrap();
+
+    let uris: Vec<&str> = items
+        .iter()
+        .map(|i| i.item.as_ref().unwrap().uri.as_str())
+        .collect();
+    assert_eq!(
+        uris,
+        ["spotify:track:a", "spotify:track:b", "spotify:track:c"]
+    );
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].path, "/v1/playlists/abc/items?offset=2&limit=2");
+}
+
+#[test]
+fn playlist_items_error_shows_message() {
+    let (base, server) = serve_once(
+        "403 Forbidden",
+        r#"{"error":{"status":403,"message":"You cannot view this playlist"}}"#,
+    );
+    let err = client_for(&base).playlist_items("abc").unwrap_err();
+    server.join().unwrap();
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("403"), "{msg}");
+    assert!(msg.contains("You cannot view this playlist"), "{msg}");
+}
+
+#[test]
+fn playlist_items_keeps_every_item_shape() {
+    // Filtering is sync's job; the client must deserialize every shape without failing.
+    let page = format!(
+        r#"{{"items":[{},{},{},{},{}],"next":null}}"#,
+        item_json("track", "spotify:track:a", false),
+        item_json("track", "spotify:local:Artist:Album:Song:180", true),
+        item_json("episode", "spotify:episode:e", false),
+        r#"{"is_local":false,"item":null}"#,
+        r#"{"item":{"type":"track","uri":"spotify:track:b"}}"#,
+    );
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let handle = server.serve(vec![Reply::new("200 OK", page)]);
+
+    let items = client.playlist_items("abc").unwrap();
+    handle.join().unwrap();
+
+    let shapes: Vec<(bool, Option<(&str, &str)>)> = items
+        .iter()
+        .map(|i| {
+            (
+                i.is_local,
+                i.item.as_ref().map(|r| (r.kind.as_str(), r.uri.as_str())),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        [
+            (false, Some(("track", "spotify:track:a"))),
+            (true, Some(("track", "spotify:local:Artist:Album:Song:180"))),
+            (false, Some(("episode", "spotify:episode:e"))),
+            (false, None),
+            // Missing `is_local` defaults to false.
+            (false, Some(("track", "spotify:track:b"))),
+        ]
+    );
+}

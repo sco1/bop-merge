@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, de::DeserializeOwned};
 use url::Url;
 
-use crate::spotify::{Playlist, User, models::Page};
+use crate::spotify::{Playlist, PlaylistItem, User, models::Page};
 
 const API_BASE: &str = "https://api.spotify.com/v1";
 const MAX_PAGES: usize = 100;
@@ -151,6 +151,15 @@ impl SpotifyClient {
     pub fn my_playlists(&self) -> Result<Vec<Playlist>> {
         let mut url = self.endpoint(&["me", "playlists"]);
         url.query_pairs_mut().append_pair("limit", "50");
+
+        self.get_all(url)
+    }
+
+    pub fn playlist_items(&self, id: &str) -> Result<Vec<PlaylistItem>> {
+        let mut url = self.endpoint(&["playlists", id, "items"]);
+        url.query_pairs_mut()
+            .append_pair("limit", "50")
+            .append_pair("fields", "items(is_local,item(type,uri)),next");
 
         self.get_all(url)
     }

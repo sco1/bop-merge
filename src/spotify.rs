@@ -3,5 +3,5 @@ mod models;
 
 pub use crate::spotify::{
     client::SpotifyClient,
-    models::{Playlist, PlaylistOwner, User},
+    models::{ItemRef, Playlist, PlaylistItem, PlaylistOwner, User},
 };

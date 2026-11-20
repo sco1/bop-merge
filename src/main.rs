@@ -7,6 +7,8 @@ use reqwest::blocking::Client;
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let client_id = std::env::var("BOPMERGE_CLIENT_ID").context("BOPMERGE_CLIENT_ID not set")?;
+    let target_id = std::env::var("BOPMERGE_TARGET_PLAYLIST_ID")
+        .context("BOPMERGE_TARGET_PLAYLIST_ID not set")?;
 
     let pkce = auth::Pkce::generate();
     let state = auth::generate_state();
@@ -24,7 +26,10 @@ fn main() -> Result<()> {
         user.display_name.as_deref().unwrap_or(&user.id),
     );
 
-    let sources = sync::select_sources(spotify_client.my_playlists()?, &user.id);
+    let (target_playlist, rest) =
+        sync::take_target_playlist(spotify_client.my_playlists()?, &target_id, &user.id)?;
+    let sources = sync::select_sources(rest, &user.id);
+    println!("found target playlist {}", target_playlist.name);
     println!("found {} source playlists", sources.len());
 
     let mut all_tracks = Vec::with_capacity(sources.len());

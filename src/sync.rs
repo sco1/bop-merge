@@ -2,6 +2,7 @@
 #[path = "sync_tests.rs"]
 mod tests;
 
+use anyhow::{Context, Result, bail};
 use regex::regex;
 
 use crate::spotify::{ItemRef, Playlist, PlaylistItem};
@@ -16,6 +17,29 @@ pub fn bop_year(name: &str) -> Option<u16> {
         .as_str()
         .parse()
         .ok()
+}
+
+pub fn take_target_playlist(
+    mut playlists: Vec<Playlist>,
+    target_id: &str,
+    user_id: &str,
+) -> Result<(Playlist, Vec<Playlist>)> {
+    let target_idx = playlists
+        .iter()
+        .position(|p| p.id == target_id)
+        .with_context(|| format!("target playlist {target_id} not found in user playlists"))?;
+    let target_playlist = playlists.remove(target_idx);
+
+    if target_playlist.owner.id != user_id {
+        bail!(
+            "target playlist {} ({}) owned by other user {}",
+            target_playlist.name,
+            target_playlist.id,
+            target_playlist.owner.id
+        );
+    }
+
+    Ok((target_playlist, playlists))
 }
 
 pub fn select_sources(playlists: Vec<Playlist>, user_id: &str) -> Vec<(u16, Playlist)> {

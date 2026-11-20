@@ -12,10 +12,7 @@ pub use crate::auth::{
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.spotify.com/authorize";
 pub const REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";
 const SCOPES: &[&str] = &[
-    "playlist-read-private",
-    "playlist-read-collaborative",
     "playlist-modify-public",
-    "playlist-modify-private",
 ];
 
 fn rand_string(len: usize) -> String {

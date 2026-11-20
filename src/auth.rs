@@ -1,5 +1,6 @@
 mod callback;
 mod pkce;
+mod token;
 
 use rand::distr::{Alphanumeric, SampleString};
 use url::Url;
@@ -7,13 +8,12 @@ use url::Url;
 pub use crate::auth::{
     callback::{bind_callback, wait_for_callback},
     pkce::Pkce,
+    token::{TokenResponse, exchange_code},
 };
 
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.spotify.com/authorize";
 pub const REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";
-const SCOPES: &[&str] = &[
-    "playlist-modify-public",
-];
+const SCOPES: &[&str] = &["playlist-modify-public"];
 
 fn rand_string(len: usize) -> String {
     Alphanumeric.sample_string(&mut rand::rng(), len)

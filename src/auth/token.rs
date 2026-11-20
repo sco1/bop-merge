@@ -73,67 +73,22 @@ pub fn exchange_code(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        thread::{self, JoinHandle},
-    };
+    use std::{net::TcpListener, thread::JoinHandle};
 
     use secrecy::ExposeSecret;
 
     use super::*;
+    use crate::test_support::{ReceivedRequest, serve_once};
 
     const SUCCESS_JSON: &str = r#"{"access_token":"access-123","token_type":"Bearer","scope":"playlist-modify-public","expires_in":3600,"refresh_token":"refresh-456"}"#;
 
-    /// Serve one canned response on a random local port.
-    ///
-    /// Returns the URL to post to and a handle that yields the request body the client sent.
-    fn serve_once(status: &'static str, body: &'static str) -> (String, JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/api/token", listener.local_addr().unwrap());
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request_body = read_body(&mut stream);
-            let len = body.len();
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\n\
-                 Content-Type: application/json\r\n\
-                 Content-Length: {len}\r\n\
-                 Connection: close\r\n\r\n{body}"
-            )
-            .unwrap();
-            request_body
-        });
-        (url, handle)
-    }
-
-    /// Read a whole request (headers plus `Content-Length` bytes) and return its body.
-    ///
-    /// Draining the body before replying keeps the client from seeing a connection reset.
-    fn read_body(stream: &mut impl Read) -> String {
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut chunk).unwrap();
-            assert!(n > 0, "client closed before sending a full request");
-            buf.extend_from_slice(&chunk[..n]);
-
-            let mut headers = [httparse::EMPTY_HEADER; 32];
-            let mut req = httparse::Request::new(&mut headers);
-            if let httparse::Status::Complete(head_len) = req.parse(&buf).unwrap() {
-                let content_len = req
-                    .headers
-                    .iter()
-                    .find(|h| h.name.eq_ignore_ascii_case("content-length"))
-                    .map(|h| std::str::from_utf8(h.value).unwrap().parse().unwrap())
-                    .unwrap_or(0);
-                let end = head_len + content_len;
-                if buf.len() >= end {
-                    return String::from_utf8(buf[head_len..end].to_vec()).unwrap();
-                }
-            }
-        }
+    /// Serve one canned response and return the token URL to post to.
+    fn serve_token(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, JoinHandle<ReceivedRequest>) {
+        let (base, server) = serve_once(status, body);
+        (format!("{base}/api/token"), server)
     }
 
     fn exchange(url: &str) -> Result<TokenResponse> {
@@ -148,7 +103,7 @@ mod tests {
 
     #[test]
     fn exchange_success() {
-        let (url, server) = serve_once("200 OK", SUCCESS_JSON);
+        let (url, server) = serve_token("200 OK", SUCCESS_JSON);
         let tokens = exchange(&url).unwrap();
         server.join().unwrap();
 
@@ -162,12 +117,14 @@ mod tests {
 
     #[test]
     fn exchange_sends_form() {
-        let (url, server) = serve_once("200 OK", SUCCESS_JSON);
+        let (url, server) = serve_token("200 OK", SUCCESS_JSON);
         let pkce = Pkce::generate();
         exchange_code_at(&Client::new(), &url, "test-client", "test-code", &pkce).unwrap();
-        let body = server.join().unwrap();
+        let request = server.join().unwrap();
 
-        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/token");
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(request.body.as_bytes())
             .into_owned()
             .collect();
         let expected = [
@@ -183,7 +140,7 @@ mod tests {
 
     #[test]
     fn exchange_missing_refresh_token() {
-        let (url, server) = serve_once(
+        let (url, server) = serve_token(
             "200 OK",
             r#"{"access_token":"access-123","token_type":"Bearer","expires_in":3600}"#,
         );
@@ -195,7 +152,7 @@ mod tests {
 
     #[test]
     fn exchange_error_shows_body() {
-        let (url, server) = serve_once(
+        let (url, server) = serve_token(
             "400 Bad Request",
             r#"{"error":"invalid_grant","error_description":"Invalid authorization code"}"#,
         );
@@ -209,7 +166,7 @@ mod tests {
 
     #[test]
     fn exchange_bad_json() {
-        let (url, server) = serve_once("200 OK", "not json");
+        let (url, server) = serve_token("200 OK", "not json");
         let err = exchange(&url).unwrap_err();
         server.join().unwrap();
 
@@ -233,7 +190,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_tokens() {
-        let (url, server) = serve_once("200 OK", SUCCESS_JSON);
+        let (url, server) = serve_token("200 OK", SUCCESS_JSON);
         let tokens = exchange(&url).unwrap();
         server.join().unwrap();
 

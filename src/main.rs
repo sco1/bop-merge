@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use bop_merge::auth;
+use bop_merge::{auth, spotify};
 use reqwest::blocking::Client;
 
 fn main() -> Result<()> {
@@ -14,7 +14,14 @@ fn main() -> Result<()> {
     let code = auth::wait_for_callback(&listener, &state)?;
     let http = Client::new();
     let tokens = auth::exchange_code(&http, &client_id, &code, &pkce)?;
-    println!("got access token (expires in {} s)", tokens.expires_in());
+
+    let spotify_client = spotify::SpotifyClient::new(http, tokens.access_token().clone());
+    let user = spotify_client.me()?;
+    println!(
+        "logged in as {} ({})",
+        user.display_name.as_deref().unwrap_or(&user.id),
+        user.id
+    );
 
     Ok(())
 }

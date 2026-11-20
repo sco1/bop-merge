@@ -2,16 +2,16 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json;
 use url::Url;
 
-use crate::spotify::User;
+use crate::spotify::{Playlist, User, models::Page};
 
 const API_BASE: &str = "https://api.spotify.com/v1";
+const MAX_PAGES: usize = 100;
 
 #[derive(Deserialize)]
 struct ErrorObject {
-    msg: String,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -64,7 +64,7 @@ impl SpotifyClient {
         if !status.is_success() {
             let body = r.text().unwrap_or_default();
             match serde_json::from_str::<ApiError>(&body) {
-                Ok(e) => bail!("Spotify API error ({status}): {}", e.error.msg),
+                Ok(e) => bail!("Spotify API error ({status}): {}", e.error.message),
                 Err(_) => bail!("Spotify API error ({status}): {body}"),
             }
         }
@@ -74,6 +74,36 @@ impl SpotifyClient {
 
     pub fn me(&self) -> Result<User> {
         self.get_json(self.endpoint(&["me"]))
+    }
+
+    fn get_all<T: DeserializeOwned>(&self, first: Url) -> Result<Vec<T>> {
+        let mut url = first;
+        let mut all: Vec<T> = Vec::new();
+
+        for _ in 0..MAX_PAGES {
+            let page: Page<T> = self.get_json(url)?;
+            all.extend(page.items);
+
+            match page.next {
+                Some(next) => {
+                    let next = Url::parse(&next).context("Spotify returned an invalid next URL")?;
+                    if next.origin() != self.base_url.origin() {
+                        bail!("next URL {next} is not on {}", self.base_url)
+                    }
+                    url = next;
+                }
+                None => return Ok(all),
+            }
+        }
+
+        bail!("pagination exceeded {MAX_PAGES} pages")
+    }
+
+    pub fn my_playlists(&self) -> Result<Vec<Playlist>> {
+        let mut url = self.endpoint(&["me", "playlists"]);
+        url.query_pairs_mut().append_pair("limit", "50");
+
+        self.get_all(url)
     }
 }
 

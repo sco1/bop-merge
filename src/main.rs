@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use bop_merge::{auth, spotify};
+use bop_merge::{auth, spotify, sync};
 use reqwest::blocking::Client;
 
 fn main() -> Result<()> {
@@ -22,6 +22,9 @@ fn main() -> Result<()> {
         user.display_name.as_deref().unwrap_or(&user.id),
         user.id
     );
+
+    let sources = sync::select_sources(spotify_client.my_playlists()?, &user.id);
+    println!("found {} source playlists", sources.len());
 
     Ok(())
 }

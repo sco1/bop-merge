@@ -6,28 +6,31 @@ mod token;
 #[path = "auth_tests.rs"]
 mod tests;
 
+use anyhow::Result;
 use rand::distr::{Alphanumeric, SampleString};
+use reqwest::blocking::Client;
 use url::Url;
 
-pub use crate::auth::{
+pub use crate::auth::token::TokenResponse;
+use crate::auth::{
     callback::{bind_callback, wait_for_callback},
     pkce::Pkce,
-    token::{TokenResponse, exchange_code},
+    token::exchange_code,
 };
 
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.spotify.com/authorize";
-pub const REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";
+const REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";
 const SCOPES: &[&str] = &["playlist-modify-public", "playlist-read-private"];
 
 fn rand_string(len: usize) -> String {
     Alphanumeric.sample_string(&mut rand::rng(), len)
 }
 
-pub fn generate_state() -> String {
+fn generate_state() -> String {
     rand_string(32)
 }
 
-pub fn authorize_url(client_id: &str, pkce: &Pkce, state: &str) -> Url {
+fn authorize_url(client_id: &str, pkce: &Pkce, state: &str) -> Url {
     let scope = SCOPES.join(" ");
     Url::parse_with_params(
         AUTHORIZE_ENDPOINT,
@@ -42,4 +45,17 @@ pub fn authorize_url(client_id: &str, pkce: &Pkce, state: &str) -> Url {
         ],
     )
     .expect("AUTHORIZE_ENDPOINT is a valid URL")
+}
+
+/// Run the interactive PKCE login: print the authorize URL, wait for the browser callback on
+/// [`REDIRECT_URI`], and exchange the code for tokens.
+pub fn login(http: &Client, client_id: &str) -> Result<TokenResponse> {
+    let pkce = Pkce::generate();
+    let state = generate_state();
+    let listener = bind_callback()?;
+    println!("open this URL to log in:");
+    println!("{}", authorize_url(client_id, &pkce, &state));
+
+    let code = wait_for_callback(&listener, &state)?;
+    exchange_code(http, client_id, &code, &pkce)
 }

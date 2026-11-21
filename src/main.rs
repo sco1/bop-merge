@@ -1,66 +1,63 @@
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
+
 use anyhow::{Context, Result};
-use bop_merge::{auth, spotify, sync};
-use reqwest::blocking::Client;
+use bop_merge::app;
+use clap::{Parser, Subcommand};
+
+const CLIENT_ID_ENV: &str = "BOPMERGE_CLIENT_ID";
+const TARGET_PLAYLIST_ID_ENV: &str = "BOPMERGE_TARGET_PLAYLIST_ID";
+
+/// Mirror every Spotify playlist, named as "YYYY Bops", into a single merged playlist.
+#[derive(Debug, Parser)]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, PartialEq, Subcommand)]
+enum Commands {
+    /// Login to Spotify & retrieve an access token.
+    Login,
+    /// Mirror the source playlists into the target playlist.
+    Sync {
+        /// Show the planned sync without applying.
+        #[arg(long)]
+        dry_run: bool,
+        /// Execute sync even if the safety guard would refuse.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+fn fetch_env_var(name: &str) -> Result<String> {
+    std::env::var(name).with_context(|| format!("{name} not set"))
+}
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
     dotenvy::dotenv().ok();
-    let client_id = std::env::var("BOPMERGE_CLIENT_ID").context("BOPMERGE_CLIENT_ID not set")?;
-    let target_id = std::env::var("BOPMERGE_TARGET_PLAYLIST_ID")
-        .context("BOPMERGE_TARGET_PLAYLIST_ID not set")?;
 
-    let pkce = auth::Pkce::generate();
-    let state = auth::generate_state();
-    let listener = auth::bind_callback()?;
-    println!("{}", auth::authorize_url(&client_id, &pkce, &state));
+    let client_id = fetch_env_var(CLIENT_ID_ENV)?;
 
-    let code = auth::wait_for_callback(&listener, &state)?;
-    let http = Client::new();
-    let tokens = auth::exchange_code(&http, &client_id, &code, &pkce)?;
+    // Temporarily login here until token storage is implemented
+    let (spotify_client, user) = app::login(&client_id)?;
 
-    let spotify_client = spotify::SpotifyClient::new(http, tokens.access_token().clone());
-    let user = spotify_client.me()?;
-    println!(
-        "logged in as {}",
-        user.display_name.as_deref().unwrap_or(&user.id),
-    );
-
-    let (target_playlist, rest) =
-        sync::take_target_playlist(spotify_client.my_playlists()?, &target_id, &user.id)?;
-    println!("found target playlist '{}'", target_playlist.name);
-
-    let existing_merged_items = spotify_client
-        .playlist_items(&target_playlist.id)
-        .with_context(|| format!("could not fetch tracks from '{}'", target_playlist.name))?;
-    let existing_merged_tracks = sync::track_uris(existing_merged_items);
-
-    let sources = sync::select_sources(rest, &user.id);
-    println!("found {} source playlists", sources.len());
-
-    let mut all_tracks = Vec::with_capacity(sources.len());
-    for (_, playlist) in &sources {
-        let items = spotify_client
-            .playlist_items(&playlist.id)
-            .with_context(|| format!("could not fetch tracks from '{}'", playlist.name))?;
-
-        let tracks = sync::track_uris(items);
-        println!(
-            "{}: {} tracks ({} skipped)",
-            playlist.name,
-            tracks.uris.len(),
-            tracks.n_skipped,
-        );
-        all_tracks.push(tracks);
+    match cli.command {
+        Commands::Login => {
+            println!("(token storage not yet implemented)");
+            Ok(())
+        }
+        Commands::Sync { dry_run, force } => {
+            let target_id = fetch_env_var(TARGET_PLAYLIST_ID_ENV)?;
+            app::run_sync(
+                &spotify_client,
+                &user,
+                &target_id,
+                app::SyncOptions { dry_run, force },
+            )
+        }
     }
-
-    let plan = sync::plan(&all_tracks, &existing_merged_tracks);
-    println!(
-        "sync plan: {} to add, {} to remove",
-        plan.add.len(),
-        plan.remove.len()
-    );
-    if let Err(e) = sync::check_plan(&plan, false) {
-        eprintln!("warning: {e:#}");
-    }
-
-    Ok(())
 }

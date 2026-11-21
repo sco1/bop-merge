@@ -2,12 +2,16 @@
 #[path = "sync_tests.rs"]
 mod tests;
 
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, bail};
 use regex::regex;
 
 use crate::spotify::{ItemRef, Playlist, PlaylistItem};
 
 const TRACK_URI_PREFIX: &str = "spotify:track:";
+/// Removing more than 1 / `MAX_REMOVE_DIVISOR` of the target's tracks needs `--force`.
+const MAX_REMOVE_DIVISOR: usize = 4;
 
 pub fn bop_year(name: &str) -> Option<u16> {
     let lower = name.to_ascii_lowercase();
@@ -76,4 +80,68 @@ pub fn track_uris(items: Vec<PlaylistItem>) -> TrackUris {
     }
 
     tracks
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct SyncPlan {
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+    pub n_sources: usize,
+    pub n_source_tracks: usize,
+    pub n_target_tracks: usize,
+}
+
+pub fn plan(sources: &[TrackUris], target: &TrackUris) -> SyncPlan {
+    let existing_uris: HashSet<&str> = target.uris.iter().map(String::as_str).collect();
+    let source_uris: HashSet<&str> = sources
+        .iter()
+        .flat_map(|s| &s.uris)
+        .map(String::as_str)
+        .collect();
+
+    let mut seen = HashSet::new();
+    let add = sources
+        .iter()
+        .flat_map(|s| &s.uris)
+        .filter(|uri| !existing_uris.contains(uri.as_str()) && seen.insert(uri.as_str()))
+        .cloned()
+        .collect();
+
+    let mut seen = HashSet::new();
+    let remove = target
+        .uris
+        .iter()
+        .filter(|uri| !source_uris.contains(uri.as_str()) && seen.insert(uri.as_str()))
+        .cloned()
+        .collect();
+
+    SyncPlan {
+        add,
+        remove,
+        n_sources: sources.len(),
+        n_source_tracks: sources.iter().map(|s| s.uris.len()).sum(),
+        n_target_tracks: target.uris.len(),
+    }
+}
+
+pub fn check_plan(plan: &SyncPlan, force: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+
+    if plan.n_sources == 0 {
+        bail!("no source playlists found; refusing to empty target playlist")
+    }
+    if plan.n_source_tracks == 0 {
+        bail!("source playlist(s) contain no tracks; refusing to empty target playlist")
+    }
+    if plan.remove.len() * MAX_REMOVE_DIVISOR > plan.n_target_tracks {
+        bail!(
+            "would remove {} of {} target tracks; exceeds threshold",
+            plan.remove.len(),
+            plan.n_target_tracks
+        )
+    }
+
+    Ok(())
 }

@@ -242,3 +242,201 @@ fn track_uris_filters_a_mixed_playlist_in_order() {
     );
     assert_eq!(result.uris.len() + result.n_skipped, n_items);
 }
+
+// --- take_target_playlist ---
+
+/// Reduce playlists to their ids, keeping order.
+fn ids(playlists: &[Playlist]) -> Vec<&str> {
+    playlists.iter().map(|p| p.id.as_str()).collect()
+}
+
+#[test]
+fn take_target_removes_owned_target_and_keeps_order() {
+    let playlists = vec![
+        playlist("a", "2023 Bops", ME),
+        playlist("t", "All Bops", ME),
+        playlist("b", "2024 Bops", ME),
+        playlist("c", "Road Trip", ME),
+    ];
+
+    let (target, rest) = take_target_playlist(playlists, "t", ME).unwrap();
+
+    assert_eq!(target.id, "t");
+    // `remove`, not `swap_remove`: the rest stays in API order.
+    assert_eq!(ids(&rest), ["a", "b", "c"]);
+}
+
+#[test]
+fn take_target_with_bops_name_is_not_a_source() {
+    let playlists = vec![
+        playlist("a", "2023 Bops", ME),
+        playlist("t", "2027 Bops", ME),
+    ];
+
+    let (target, rest) = take_target_playlist(playlists, "t", ME).unwrap();
+
+    assert_eq!(target.id, "t");
+    assert_eq!(year_ids(&select_sources(rest, ME)), [(2023, "a")]);
+}
+
+#[test]
+fn take_target_missing_id() {
+    let playlists = vec![playlist("a", "2023 Bops", ME)];
+
+    let err = take_target_playlist(playlists, "nope", ME).unwrap_err();
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("nope"), "{msg}");
+}
+
+#[test]
+fn take_target_not_owned() {
+    let playlists = vec![playlist("t", "Their Bops", "someone-else")];
+
+    let err = take_target_playlist(playlists, "t", ME).unwrap_err();
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("owned by"), "{msg}");
+    assert!(msg.contains("someone-else"), "{msg}");
+}
+
+// --- plan ---
+
+fn uri(id: &str) -> String {
+    format!("{TRACK_URI_PREFIX}{id}")
+}
+
+fn tracks(ids: &[&str]) -> TrackUris {
+    TrackUris {
+        uris: ids.iter().map(|id| uri(id)).collect(),
+        n_skipped: 0,
+    }
+}
+
+fn uri_list(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| uri(id)).collect()
+}
+
+/// Two sources with a duplicate inside one and across both.
+fn two_sources() -> [TrackUris; 2] {
+    [tracks(&["a", "b", "a"]), tracks(&["c", "b", "d"])]
+}
+
+#[test]
+fn plan_first_run_adds_each_source_track_once_in_order() {
+    assert_eq!(
+        plan(&two_sources(), &tracks(&[])),
+        SyncPlan {
+            add: uri_list(&["a", "b", "c", "d"]),
+            remove: Vec::new(),
+            n_sources: 2,
+            n_source_tracks: 6,
+            n_target_tracks: 0,
+        }
+    );
+}
+
+#[test]
+fn plan_in_sync_target_changes_nothing() {
+    // Idempotency: a target that already mirrors the sources, in any order.
+    let result = plan(&two_sources(), &tracks(&["d", "c", "b", "a"]));
+
+    assert!(result.add.is_empty(), "{result:?}");
+    assert!(result.remove.is_empty(), "{result:?}");
+}
+
+#[test]
+fn plan_removes_target_extras_once_in_target_order() {
+    assert_eq!(
+        plan(&two_sources(), &tracks(&["a", "x", "b", "x", "y"])),
+        SyncPlan {
+            add: uri_list(&["c", "d"]),
+            remove: uri_list(&["x", "y"]),
+            n_sources: 2,
+            n_source_tracks: 6,
+            n_target_tracks: 5,
+        }
+    );
+}
+
+#[test]
+fn plan_without_sources_removes_whole_target() {
+    // check_plan must refuse this; plan itself just reports it.
+    assert_eq!(
+        plan(&[], &tracks(&["a"])),
+        SyncPlan {
+            add: Vec::new(),
+            remove: uri_list(&["a"]),
+            n_sources: 0,
+            n_source_tracks: 0,
+            n_target_tracks: 1,
+        }
+    );
+}
+
+// --- check_plan ---
+
+fn sync_plan(
+    n_sources: usize,
+    n_source_tracks: usize,
+    n_remove: usize,
+    n_target_tracks: usize,
+) -> SyncPlan {
+    SyncPlan {
+        remove: (0..n_remove).map(|i| uri(&i.to_string())).collect(),
+        n_sources,
+        n_source_tracks,
+        n_target_tracks,
+        ..Default::default()
+    }
+}
+
+fn check_err(plan: &SyncPlan) -> String {
+    format!("{:#}", check_plan(plan, false).unwrap_err())
+}
+
+#[test]
+fn check_allows_healthy_plan() {
+    assert!(check_plan(&sync_plan(4, 340, 0, 331), false).is_ok());
+}
+
+#[test]
+fn check_allows_first_run_with_empty_target() {
+    assert!(check_plan(&sync_plan(4, 340, 0, 0), false).is_ok());
+}
+
+#[test]
+fn check_allows_exactly_a_quarter_removed() {
+    assert!(check_plan(&sync_plan(4, 340, 1, 4), false).is_ok());
+}
+
+#[test]
+fn check_refuses_no_sources() {
+    let msg = check_err(&sync_plan(0, 0, 331, 331));
+    assert!(msg.contains("no source"), "{msg}");
+}
+
+#[test]
+fn check_refuses_sources_without_tracks() {
+    let msg = check_err(&sync_plan(4, 0, 331, 331));
+    assert!(msg.contains("no tracks"), "{msg}");
+}
+
+#[test]
+fn check_refuses_more_than_a_quarter_removed() {
+    let msg = check_err(&sync_plan(4, 340, 2, 7));
+    assert!(msg.contains("2 of 7"), "{msg}");
+}
+
+#[test]
+fn check_force_overrides_every_guard() {
+    for failing in [
+        sync_plan(0, 0, 331, 331),
+        sync_plan(4, 0, 331, 331),
+        sync_plan(4, 340, 2, 7),
+    ] {
+        // Fails without force (check_err panics on Ok), passes with it.
+        check_err(&failing);
+        assert!(check_plan(&failing, true).is_ok(), "{failing:?}");
+    }
+}

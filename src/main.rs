@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use anyhow::{Context, Result};
 use bop_merge::{auth, spotify, sync};
 use reqwest::blocking::Client;
@@ -28,15 +26,21 @@ fn main() -> Result<()> {
 
     let (target_playlist, rest) =
         sync::take_target_playlist(spotify_client.my_playlists()?, &target_id, &user.id)?;
+    println!("found target playlist '{}'", target_playlist.name);
+
+    let existing_merged_items = spotify_client
+        .playlist_items(&target_playlist.id)
+        .with_context(|| format!("could not fetch tracks from '{}'", target_playlist.name))?;
+    let existing_merged_tracks = sync::track_uris(existing_merged_items);
+
     let sources = sync::select_sources(rest, &user.id);
-    println!("found target playlist {}", target_playlist.name);
     println!("found {} source playlists", sources.len());
 
     let mut all_tracks = Vec::with_capacity(sources.len());
     for (_, playlist) in &sources {
         let items = spotify_client
             .playlist_items(&playlist.id)
-            .with_context(|| format!("could not fetch tracks from {}", playlist.name))?;
+            .with_context(|| format!("could not fetch tracks from '{}'", playlist.name))?;
 
         let tracks = sync::track_uris(items);
         println!(
@@ -48,12 +52,15 @@ fn main() -> Result<()> {
         all_tracks.push(tracks);
     }
 
-    let total_tracks = all_tracks.iter().map(|t| t.uris.len()).sum::<usize>();
-    let unique_tracks: HashSet<_> = all_tracks.iter().flat_map(|t| t.uris.iter()).collect();
+    let plan = sync::plan(&all_tracks, &existing_merged_tracks);
     println!(
-        "total: {total_tracks} tracks, {} unique",
-        unique_tracks.len(),
+        "sync plan: {} to add, {} to remove",
+        plan.add.len(),
+        plan.remove.len()
     );
+    if let Err(e) = sync::check_plan(&plan, false) {
+        eprintln!("warning: {e:#}");
+    }
 
     Ok(())
 }

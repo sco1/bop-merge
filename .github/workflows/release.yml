@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # upload assets to the release
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+
+      # No build cache: release binaries are built from a clean slate.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          name="bop-merge-${TAG}-${{ matrix.target }}"
+          mkdir "$name"
+          bin="target/${{ matrix.target }}/release/bop-merge"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            cp "$bin.exe" README.md LICENSE "$name/"
+            7z a "$name.zip" "$name" > /dev/null
+            asset="$name.zip"
+          else
+            cp "$bin" README.md LICENSE "$name/"
+            tar -czf "$name.tar.gz" "$name"
+            asset="$name.tar.gz"
+          fi
+
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber --repo "$GITHUB_REPOSITORY"

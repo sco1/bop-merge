@@ -3,7 +3,7 @@
 mod tests;
 
 use anyhow::{Context, Result};
-use bop_merge::app;
+use bop_merge::{app, auth};
 use clap::{Parser, Subcommand};
 
 const CLIENT_ID_ENV: &str = "BOPMERGE_CLIENT_ID";
@@ -41,17 +41,13 @@ fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     let client_id = fetch_env_var(CLIENT_ID_ENV)?;
-
-    // Temporarily login here until token storage is implemented
-    let (spotify_client, user) = app::login(&client_id)?;
+    let store = auth::KeychainStore::new(&client_id)?;
 
     match cli.command {
-        Commands::Login => {
-            println!("(token storage not yet implemented)");
-            Ok(())
-        }
+        Commands::Login => app::login(&client_id, &store),
         Commands::Sync { dry_run, force } => {
             let target_id = fetch_env_var(TARGET_PLAYLIST_ID_ENV)?;
+            let (spotify_client, user) = app::connect(&client_id, &store)?;
             app::run_sync(
                 &spotify_client,
                 &user,

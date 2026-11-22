@@ -1,5 +1,6 @@
 mod callback;
 mod pkce;
+mod store;
 mod token;
 
 #[cfg(test)]
@@ -11,11 +12,14 @@ use rand::distr::{Alphanumeric, SampleString};
 use reqwest::blocking::Client;
 use url::Url;
 
-pub use crate::auth::token::TokenResponse;
 use crate::auth::{
     callback::{bind_callback, wait_for_callback},
     pkce::Pkce,
     token::exchange_code,
+};
+pub use crate::auth::{
+    store::{KeychainStore, TokenStore},
+    token::{InvalidGrant, TokenResponse, refresh},
 };
 
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.spotify.com/authorize";

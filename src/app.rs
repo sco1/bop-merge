@@ -1,23 +1,67 @@
-use anyhow::{Context, Result};
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;
+
+use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 
 use crate::{
-    auth,
+    auth::{self, TokenStore},
     spotify::{SpotifyClient, User},
     sync,
 };
 
-pub fn login(client_id: &str) -> Result<(SpotifyClient, User)> {
-    let http = Client::new();
-    let tokens = auth::login(&http, client_id)?;
-    let spotify_client = SpotifyClient::new(http, tokens.access_token().clone());
-    let user = spotify_client.me()?;
+fn print_login(user: &User) {
     println!(
         "logged in as {}",
         user.display_name.as_deref().unwrap_or(&user.id),
     );
+}
 
-    Ok((spotify_client, user))
+/// Log in through the browser and save the refresh token for later `sync` runs.
+pub fn login(client_id: &str, store: &dyn TokenStore) -> Result<()> {
+    let http = Client::new();
+    let tokens = auth::login(&http, client_id)?;
+    let refresh_token = tokens
+        .refresh_token()
+        .context("token response had no refresh token")?;
+    store.save(refresh_token)?;
+
+    let user = SpotifyClient::new(http, tokens.access_token().clone()).me()?;
+    print_login(&user);
+    println!("login saved");
+
+    Ok(())
+}
+
+/// Connect using the saved refresh token.
+pub fn connect(client_id: &str, store: &dyn TokenStore) -> Result<(SpotifyClient, User)> {
+    let Some(refresh_token) = store.load()? else {
+        bail!("not logged in; run `bop-merge login`");
+    };
+
+    let http = Client::new();
+    let tokens = match auth::refresh(&http, client_id, &refresh_token) {
+        Ok(tokens) => tokens,
+        Err(e) if e.downcast_ref::<auth::InvalidGrant>().is_some() => {
+            if let Err(clear_err) = store.clear() {
+                eprintln!("warning: {clear_err:#}");
+            }
+            return Err(e.context("saved login expired or was revoked; run `bop-merge login`"));
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Save a rotated refresh token
+    if let Some(new_refresh_token) = tokens.refresh_token() {
+        store.save(new_refresh_token)?;
+    }
+
+    let client = SpotifyClient::new(http, tokens.access_token().clone());
+    let user = client.me()?;
+    print_login(&user);
+
+    Ok((client, user))
 }
 
 #[derive(Debug, Clone, Copy, Default)]

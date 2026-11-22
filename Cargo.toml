@@ -2,6 +2,7 @@
 name = "bop-merge"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -9,6 +10,7 @@ base64 = "0.23.1"
 clap = { version = "4.6.9", features = ["derive"] }
 dotenvy = "0.15.7"
 httparse = "1.10.1"
+keyring-core = "1.1.0"
 rand = "0.10.4"
 regex = "1.13.2"
 reqwest = { version = "0.13.5", features = ["blocking", "form", "json"] }
@@ -17,3 +19,12 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 url = "2.5.8"
+
+[target."cfg(windows)".dependencies]
+windows-native-keyring-store = "1.1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }

@@ -121,3 +121,117 @@ fn debug_redacts_tokens() {
     assert!(!debug.contains("refresh-456"), "{debug}");
     assert!(debug.contains("3600"), "{debug}");
 }
+
+// --- refresh ---
+
+const REFRESHED_JSON: &str = r#"{"access_token":"access-789","token_type":"Bearer","scope":"playlist-modify-public","expires_in":3600}"#;
+
+fn refresh_with(url: &str) -> Result<TokenResponse> {
+    refresh_at(
+        &Client::new(),
+        url,
+        "test-client",
+        &SecretString::from("old-refresh"),
+    )
+}
+
+#[test]
+fn refresh_sends_form() {
+    let (url, server) = serve_token("200 OK", REFRESHED_JSON);
+    refresh_with(&url).unwrap();
+    let request = server.join().unwrap();
+
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/token");
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(request.body.as_bytes())
+        .into_owned()
+        .collect();
+    let expected = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", "old-refresh"),
+        ("client_id", "test-client"),
+    ]
+    .map(|(k, v)| (k.to_owned(), v.to_owned()));
+    assert_eq!(pairs, expected);
+}
+
+#[test]
+fn refresh_without_new_refresh_token_is_ok() {
+    // Spotify may omit the refresh token; the caller keeps using the old one.
+    let (url, server) = serve_token("200 OK", REFRESHED_JSON);
+    let tokens = refresh_with(&url).unwrap();
+    server.join().unwrap();
+
+    assert_eq!(tokens.access_token().expose_secret(), "access-789");
+    assert!(tokens.refresh_token().is_none());
+}
+
+#[test]
+fn refresh_returns_rotated_refresh_token() {
+    let (url, server) = serve_token("200 OK", SUCCESS_JSON);
+    let tokens = refresh_with(&url).unwrap();
+    server.join().unwrap();
+
+    assert_eq!(
+        tokens.refresh_token().map(|t| t.expose_secret()),
+        Some("refresh-456")
+    );
+}
+
+#[test]
+fn refresh_invalid_grant_is_detectable() {
+    let (url, server) = serve_token(
+        "400 Bad Request",
+        r#"{"error":"invalid_grant","error_description":"Refresh token revoked"}"#,
+    );
+    let err = refresh_with(&url).unwrap_err();
+    server.join().unwrap();
+
+    assert!(err.downcast_ref::<InvalidGrant>().is_some(), "{err:#}");
+}
+
+#[test]
+fn refresh_other_client_error_is_not_invalid_grant() {
+    let (url, server) = serve_token("400 Bad Request", r#"{"error":"invalid_client"}"#);
+    let err = refresh_with(&url).unwrap_err();
+    server.join().unwrap();
+
+    assert!(err.downcast_ref::<InvalidGrant>().is_none(), "{err:#}");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("400"), "{msg}");
+    assert!(msg.contains("invalid_client"), "{msg}");
+}
+
+#[test]
+fn refresh_invalid_grant_body_on_server_error_is_not_invalid_grant() {
+    // Only a 400 means the token was rejected; a 5xx says nothing about the token.
+    let (url, server) = serve_token("500 Internal Server Error", r#"{"error":"invalid_grant"}"#);
+    let err = refresh_with(&url).unwrap_err();
+    server.join().unwrap();
+
+    assert!(err.downcast_ref::<InvalidGrant>().is_none(), "{err:#}");
+    assert!(format!("{err:#}").contains("500"), "{err:#}");
+}
+
+#[test]
+fn refresh_non_json_error_is_not_invalid_grant() {
+    let (url, server) = serve_token("400 Bad Request", "bad request");
+    let err = refresh_with(&url).unwrap_err();
+    server.join().unwrap();
+
+    assert!(err.downcast_ref::<InvalidGrant>().is_none(), "{err:#}");
+    assert!(format!("{err:#}").contains("bad request"), "{err:#}");
+}
+
+#[test]
+fn exchange_invalid_grant_is_not_mapped() {
+    // A rejected login code is not an expired saved login.
+    let (url, server) = serve_token(
+        "400 Bad Request",
+        r#"{"error":"invalid_grant","error_description":"Invalid authorization code"}"#,
+    );
+    let err = exchange(&url).unwrap_err();
+    server.join().unwrap();
+
+    assert!(err.downcast_ref::<InvalidGrant>().is_none(), "{err:#}");
+}

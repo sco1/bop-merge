@@ -3,6 +3,10 @@
 use std::{
     io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -78,9 +82,40 @@ impl FakeServer {
     ///
     /// The handle yields every request received. If the client makes fewer requests than
     /// there are replies, the server stops after [`ACCEPT_TIMEOUT`] and returns what it got,
-    /// so the test can assert on the count instead of hanging.
+    /// so the test can assert on the count instead of hanging. When a test offers spare
+    /// replies on purpose, use [`serve_until_finished`](Self::serve_until_finished) instead.
     pub fn serve(self, replies: Vec<Reply>) -> JoinHandle<Vec<ReceivedRequest>> {
-        thread::spawn(move || serve_replies(&self.listener, replies))
+        thread::spawn(move || serve_replies(&self.listener, replies, None))
+    }
+
+    /// Like [`serve`](Self::serve), but stops as soon as the test calls
+    /// [`FinishHandle::finish`] rather than waiting out [`ACCEPT_TIMEOUT`] for unused replies.
+    ///
+    /// For tests that offer more replies than the client should use, to check that it stops
+    /// early. The client is blocking: any request it sent waited for its reply before the
+    /// client returned, so once the test calls `finish`, no request can still be in flight.
+    /// [`ACCEPT_TIMEOUT`] still applies if `finish` is never called.
+    pub fn serve_until_finished(self, replies: Vec<Reply>) -> FinishHandle {
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let handle = thread::spawn(move || serve_replies(&self.listener, replies, Some(&flag)));
+        FinishHandle { handle, finished }
+    }
+}
+
+/// A server started by [`FakeServer::serve_until_finished`].
+pub struct FinishHandle {
+    handle: JoinHandle<Vec<ReceivedRequest>>,
+    finished: Arc<AtomicBool>,
+}
+
+impl FinishHandle {
+    /// Tell the server the client is done, then return every request it received.
+    ///
+    /// Panics if the server thread panicked.
+    pub fn finish(self) -> Vec<ReceivedRequest> {
+        self.finished.store(true, Ordering::Release);
+        self.handle.join().expect("fake server thread panicked")
     }
 }
 
@@ -95,18 +130,24 @@ pub fn serve_once(
     let server = FakeServer::bind();
     let base = server.base().to_owned();
     let handle = thread::spawn(move || {
-        serve_replies(&server.listener, vec![Reply::new(status, body)])
+        serve_replies(&server.listener, vec![Reply::new(status, body)], None)
             .pop()
             .expect("client made no request")
     });
     (base, handle)
 }
 
-fn serve_replies(listener: &TcpListener, replies: Vec<Reply>) -> Vec<ReceivedRequest> {
+/// Answer one connection per reply, stopping early on [`ACCEPT_TIMEOUT`] or once `finished`
+/// (when given) is set.
+fn serve_replies(
+    listener: &TcpListener,
+    replies: Vec<Reply>,
+    finished: Option<&AtomicBool>,
+) -> Vec<ReceivedRequest> {
     listener.set_nonblocking(true).unwrap();
     let mut received = Vec::new();
     for reply in replies {
-        let Some(mut stream) = accept_before_deadline(listener) else {
+        let Some(mut stream) = accept_before_deadline(listener, finished) else {
             break;
         };
         received.push(read_request(&mut stream));
@@ -115,7 +156,10 @@ fn serve_replies(listener: &TcpListener, replies: Vec<Reply>) -> Vec<ReceivedReq
     received
 }
 
-fn accept_before_deadline(listener: &TcpListener) -> Option<TcpStream> {
+fn accept_before_deadline(
+    listener: &TcpListener,
+    finished: Option<&AtomicBool>,
+) -> Option<TcpStream> {
     let deadline = Instant::now() + ACCEPT_TIMEOUT;
     loop {
         match listener.accept() {
@@ -125,7 +169,10 @@ fn accept_before_deadline(listener: &TcpListener) -> Option<TcpStream> {
                 return Some(stream);
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
+                // Checked only after `accept` found nothing waiting, so a request the client
+                // sent before finishing is always served first.
+                let is_finished = finished.is_some_and(|f| f.load(Ordering::Acquire));
+                if is_finished || Instant::now() >= deadline {
                     return None;
                 }
                 thread::sleep(Duration::from_millis(5));

@@ -7,17 +7,18 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result, bail};
 use reqwest::{
     StatusCode,
-    blocking::{Client, Response},
+    blocking::{Client, RequestBuilder, Response},
     header::{HeaderMap, RETRY_AFTER},
 };
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use url::Url;
 
 use crate::spotify::{Playlist, PlaylistItem, User, models::Page};
 
 const API_BASE: &str = "https://api.spotify.com/v1";
 const MAX_PAGES: usize = 100;
+const MAX_ITEMS_PER_REQUEST: usize = 100;
 const MAX_RETRIES: u32 = 5;
 const MAX_WAIT_SECS: u64 = 60;
 
@@ -29,6 +30,27 @@ fn retry_after(headers: &HeaderMap) -> Option<u64> {
     headers.get(RETRY_AFTER)?.to_str().ok()?.parse().ok()
 }
 
+fn check_status(r: Response) -> Result<Response> {
+    let status = r.status();
+    if status.is_success() {
+        return Ok(r);
+    }
+
+    let hint = if status == StatusCode::TOO_MANY_REQUESTS {
+        retry_after(r.headers())
+            .map(|s| format!(" (Spotify asks to wait {s}s)"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let body = r.text().unwrap_or_default();
+
+    match serde_json::from_str::<ApiError>(&body) {
+        Ok(e) => bail!("Spotify API error ({status}): {}{hint}", e.error.message),
+        Err(_) => bail!("Spotify API error ({status}): {body}{hint}"),
+    }
+}
+
 #[derive(Deserialize)]
 struct ErrorObject {
     message: String,
@@ -37,6 +59,21 @@ struct ErrorObject {
 #[derive(Deserialize)]
 struct ApiError {
     error: ErrorObject,
+}
+
+#[derive(Serialize)]
+struct ItemUri<'a> {
+    uri: &'a str,
+}
+
+#[derive(Serialize)]
+struct AddItemsBody<'a> {
+    uris: &'a [String],
+}
+
+#[derive(Serialize)]
+struct RemoveItemsBody<'a> {
+    items: Vec<ItemUri<'a>>,
 }
 
 pub struct SpotifyClient {
@@ -72,12 +109,10 @@ impl SpotifyClient {
         url
     }
 
-    fn send_with_retry(&self, url: &Url) -> Result<Response> {
+    fn send_with_retry(&self, build: impl Fn() -> RequestBuilder) -> Result<Response> {
         let mut attempt: u32 = 0;
         loop {
-            let r = self
-                .http
-                .get(url.clone())
+            let r = build()
                 .bearer_auth(self.access_token.expose_secret())
                 .send()
                 .context("could not reach Spotify API")?;
@@ -100,24 +135,7 @@ impl SpotifyClient {
     }
 
     fn get_json<T: DeserializeOwned>(&self, url: Url) -> Result<T> {
-        let r = self.send_with_retry(&url)?;
-        let status = r.status();
-        if !status.is_success() {
-            let hint = if status == StatusCode::TOO_MANY_REQUESTS {
-                retry_after(r.headers())
-                    .map(|s| format!(" (Spotify asks to wait {s}s)"))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let body = r.text().unwrap_or_default();
-
-            match serde_json::from_str::<ApiError>(&body) {
-                Ok(e) => bail!("Spotify API error ({status}): {}{hint}", e.error.message),
-                Err(_) => bail!("Spotify API error ({status}): {body}{hint}"),
-            }
-        }
-
+        let r = check_status(self.send_with_retry(|| self.http.get(url.clone()))?)?;
         r.json().context("unexpected response from Spotify API")
     }
 
@@ -162,5 +180,27 @@ impl SpotifyClient {
             .append_pair("fields", "items(is_local,item(type,uri)),next");
 
         self.get_all(url)
+    }
+
+    pub fn add_items(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
+        let url = self.endpoint(&["playlists", playlist_id, "items"]);
+        for chunk in uris.chunks(MAX_ITEMS_PER_REQUEST) {
+            let body = AddItemsBody { uris: chunk };
+            check_status(self.send_with_retry(|| self.http.post(url.clone()).json(&body))?)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_items(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
+        let url = self.endpoint(&["playlists", playlist_id, "items"]);
+        for chunk in uris.chunks(MAX_ITEMS_PER_REQUEST) {
+            let body = RemoveItemsBody {
+                items: chunk.iter().map(|uri| ItemUri { uri }).collect(),
+            };
+            check_status(self.send_with_retry(|| self.http.delete(url.clone()).json(&body))?)?;
+        }
+
+        Ok(())
     }
 }

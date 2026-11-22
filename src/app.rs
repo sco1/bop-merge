@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 
 use crate::{
@@ -79,5 +79,14 @@ pub fn run_sync(
     }
 
     sync::check_plan(&plan, opts.force)?;
-    bail!("applying changes is not implemented yet; rerun with --dry-run")
+    client
+        .remove_items(&target_playlist.id, &plan.remove)
+        .with_context(|| format!("could not remove tracks from '{}'", target_playlist.name))?;
+    println!("removed {} tracks", plan.remove.len());
+    client
+        .add_items(&target_playlist.id, &plan.add)
+        .with_context(|| format!("could not add tracks to '{}'", target_playlist.name))?;
+    println!("added {} tracks", plan.add.len());
+
+    Ok(())
 }

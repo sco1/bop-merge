@@ -20,7 +20,11 @@ use crate::auth::{
 
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.spotify.com/authorize";
 const REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";
-const SCOPES: &[&str] = &["playlist-modify-public", "playlist-read-private"];
+const SCOPES: &[&str] = &[
+    "playlist-read-private",
+    "playlist-modify-public",
+    "playlist-modify-private",
+];
 
 fn rand_string(len: usize) -> String {
     Alphanumeric.sample_string(&mut rand::rng(), len)

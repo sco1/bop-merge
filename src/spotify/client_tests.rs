@@ -3,7 +3,7 @@ use std::time::Instant;
 use reqwest::header::HeaderValue;
 
 use super::*;
-use crate::test_support::{FakeServer, Reply, serve_once};
+use crate::test_support::{FakeServer, ReceivedRequest, Reply, serve_once};
 
 const PROFILE_JSON: &str = r#"{"account_id":"aB3dE5fG7h","display_name":"Test User","external_urls":{"spotify":"https://open.spotify.com/user/test-user"},"href":"https://api.spotify.com/v1/users/test-user","id":"test-user","images":[],"type":"user","uri":"spotify:user:test-user"}"#;
 
@@ -427,4 +427,191 @@ fn playlist_items_keeps_every_item_shape() {
             (false, Some(("track", "spotify:track:b"))),
         ]
     );
+}
+
+// --- add_items / remove_items ---
+
+/// `n` distinct track URIs: `spotify:track:0`, `spotify:track:1`, ...
+fn track_uris(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("spotify:track:{i}")).collect()
+}
+
+/// Parse a received request body, so assertions don't depend on JSON formatting.
+fn body_json(request: &ReceivedRequest) -> serde_json::Value {
+    serde_json::from_str(&request.body).unwrap()
+}
+
+/// Number of URIs in an add (`uris`) or remove (`items`) body.
+fn batch_len(request: &ReceivedRequest) -> usize {
+    let body = body_json(request);
+    body.get("uris")
+        .or_else(|| body.get("items"))
+        .and_then(|v| v.as_array())
+        .unwrap()
+        .len()
+}
+
+const SNAPSHOT_JSON: &str = r#"{"snapshot_id":"abc"}"#;
+
+#[test]
+fn add_items_posts_uris_body() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let handle = server.serve(vec![Reply::new("201 Created", SNAPSHOT_JSON)]);
+
+    client.add_items("t", &track_uris(2)).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/v1/playlists/t/items");
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer test-token")
+    );
+    assert_eq!(requests[0].header("content-type"), Some("application/json"));
+    assert_eq!(
+        body_json(&requests[0]),
+        serde_json::json!({"uris": ["spotify:track:0", "spotify:track:1"]})
+    );
+}
+
+#[test]
+fn remove_items_deletes_items_body() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let handle = server.serve(vec![Reply::new("200 OK", SNAPSHOT_JSON)]);
+
+    client.remove_items("t", &track_uris(2)).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "DELETE");
+    assert_eq!(requests[0].path, "/v1/playlists/t/items");
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer test-token")
+    );
+    assert_eq!(
+        body_json(&requests[0]),
+        serde_json::json!({"items": [{"uri": "spotify:track:0"}, {"uri": "spotify:track:1"}]})
+    );
+}
+
+#[test]
+fn add_items_splits_into_batches_of_100_in_order() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let handle = server.serve(vec![
+        Reply::new("201 Created", SNAPSHOT_JSON),
+        Reply::new("201 Created", SNAPSHOT_JSON),
+    ]);
+
+    client.add_items("t", &track_uris(101)).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 2);
+    let first = body_json(&requests[0]);
+    assert_eq!(batch_len(&requests[0]), 100);
+    assert_eq!(first["uris"][0], "spotify:track:0");
+    assert_eq!(first["uris"][99], "spotify:track:99");
+    assert_eq!(
+        body_json(&requests[1]),
+        serde_json::json!({"uris": ["spotify:track:100"]})
+    );
+}
+
+#[test]
+fn remove_items_splits_into_batches_of_100() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let handle = server.serve(vec![
+        Reply::new("200 OK", SNAPSHOT_JSON),
+        Reply::new("200 OK", SNAPSHOT_JSON),
+        Reply::new("200 OK", SNAPSHOT_JSON),
+    ]);
+
+    client.remove_items("t", &track_uris(250)).unwrap();
+    let requests = handle.join().unwrap();
+
+    let sizes: Vec<usize> = requests.iter().map(batch_len).collect();
+    assert_eq!(sizes, [100, 100, 50]);
+}
+
+#[test]
+fn add_items_exactly_100_is_one_request() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    // One reply only: the server stops after it, so a second request would be refused.
+    let handle = server.serve(vec![Reply::new("201 Created", SNAPSHOT_JSON)]);
+
+    client.add_items("t", &track_uris(100)).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(batch_len(&requests[0]), 100);
+}
+
+#[test]
+fn empty_writes_send_nothing() {
+    // Nothing listens on port 1, so any request would fail.
+    let client = client_for("http://127.0.0.1:1");
+
+    client.add_items("t", &[]).unwrap();
+    client.remove_items("t", &[]).unwrap();
+}
+
+#[test]
+fn add_items_error_shows_message() {
+    let (base, server) = serve_once(
+        "403 Forbidden",
+        r#"{"error":{"status":403,"message":"You cannot add tracks to a playlist you don't own."}}"#,
+    );
+    let err = client_for(&base)
+        .add_items("t", &track_uris(1))
+        .unwrap_err();
+    server.join().unwrap();
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("403"), "{msg}");
+    assert!(msg.contains("you don't own"), "{msg}");
+}
+
+#[test]
+fn add_items_stops_at_first_failed_batch() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    // The spare second reply would serve a wrongly sent second batch, so the count below
+    // catches it; `serve_until_finished` avoids waiting out the accept timeout for it.
+    let handle = server.serve_until_finished(vec![
+        Reply::new(
+            "403 Forbidden",
+            r#"{"error":{"status":403,"message":"no"}}"#,
+        ),
+        Reply::new("201 Created", SNAPSHOT_JSON),
+    ]);
+
+    let err = client.add_items("t", &track_uris(101)).unwrap_err();
+    let requests = handle.finish();
+
+    assert!(format!("{err:#}").contains("403"));
+    // The second batch must not be sent after the first fails.
+    assert_eq!(requests.len(), 1);
+}
+
+#[test]
+fn add_items_retries_429_with_the_same_body() {
+    let server = FakeServer::bind();
+    let client = client_for(server.base());
+    let handle = server.serve(vec![
+        rate_limited("0"),
+        Reply::new("201 Created", SNAPSHOT_JSON),
+    ]);
+
+    client.add_items("t", &track_uris(3)).unwrap();
+    let requests = handle.join().unwrap();
+
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(body_json(&requests[0]), body_json(&requests[1]));
 }

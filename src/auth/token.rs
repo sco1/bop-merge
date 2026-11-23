@@ -1,3 +1,6 @@
+//! Requests to the Spotify token endpoint: exchanging an authorization code for tokens and
+//! refreshing an access token.
+
 #[cfg(test)]
 #[path = "token_tests.rs"]
 mod tests;
@@ -13,6 +16,9 @@ use crate::auth::{REDIRECT_URI, pkce::Pkce};
 
 const TOKEN_ENDPOINT: &str = "https://accounts.spotify.com/api/token";
 
+/// Tokens returned by the Spotify token endpoint.
+///
+/// Tokens are held as [`SecretString`], so `Debug` output redacts them.
 #[derive(Debug, Deserialize)]
 pub struct TokenResponse {
     access_token: SecretString,
@@ -21,17 +27,27 @@ pub struct TokenResponse {
 }
 
 impl TokenResponse {
+    /// Return the bearer token for Web API requests.
     pub fn access_token(&self) -> &SecretString {
         &self.access_token
     }
+
+    /// Return the access token's lifetime in seconds.
     pub fn expires_in(&self) -> u64 {
         self.expires_in
     }
+
+    /// Return the refresh token, if Spotify issued one.
+    ///
+    /// A code exchange should always include one. A refresh includes one only when Spotify rotates
+    /// the refresh token, in which case the new token replaces the saved one.
     pub fn refresh_token(&self) -> Option<&SecretString> {
         self.refresh_token.as_ref()
     }
 }
 
+/// Error returned by [`refresh`] when Spotify rejects the refresh token as expired, revoked, or
+/// otherwise invalid.
 #[derive(Debug)]
 pub struct InvalidGrant;
 
@@ -72,6 +88,9 @@ impl fmt::Display for TokenRequestError {
 
 impl std::error::Error for TokenRequestError {}
 
+/// POSTs `form` to the token endpoint at `token_url` and parses the response.
+///
+/// A non-success status is returned as a [`TokenRequestError`] for downstream inspection.
 fn request_tokens(http: &Client, token_url: &str, form: &[(&str, &str)]) -> Result<TokenResponse> {
     let r = http
         .post(token_url)
@@ -89,6 +108,7 @@ fn request_tokens(http: &Client, token_url: &str, form: &[(&str, &str)]) -> Resu
         .context("token response was not the expected JSON")
 }
 
+/// Does the work of [`exchange_code`] against any `token_url`, so tests can use a mock server.
 fn exchange_code_at(
     http: &Client,
     token_url: &str,
@@ -115,6 +135,7 @@ fn exchange_code_at(
     Ok(tokens)
 }
 
+/// Does the work of [`refresh`] against any `token_url`, so tests can use a mock server.
 fn refresh_at(
     http: &Client,
     token_url: &str,
@@ -136,6 +157,14 @@ fn refresh_at(
     })
 }
 
+/// Exchanges the authorization code from the login redirect for tokens.
+///
+/// `pkce` must be the verifier pair whose challenge was sent in the authorize request.
+///
+/// # Errors
+///
+/// Returns an error if the token endpoint cannot be reached, rejects the request, returns
+/// unexpected JSON, or omits the refresh token.
 pub fn exchange_code(
     http: &Client,
     client_id: &str,
@@ -145,9 +174,15 @@ pub fn exchange_code(
     exchange_code_at(http, TOKEN_ENDPOINT, client_id, code, pkce)
 }
 
-/// Exchange a refresh token for a new access token (and possibly a new refresh token).
+/// Exchanges a refresh token for a new access token.
 ///
-/// Fails with [`InvalidGrant`] if Spotify rejects the refresh token.
+/// The response may include a rotated refresh token; see [`TokenResponse::refresh_token`].
+///
+/// # Errors
+///
+/// Returns [`InvalidGrant`], wrapped in an [`anyhow::Error`], if Spotify rejects the refresh
+/// token. Returns other errors if the token endpoint cannot be reached, fails, or returns
+/// unexpected JSON.
 pub fn refresh(
     http: &Client,
     client_id: &str,

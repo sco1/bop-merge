@@ -1,6 +1,6 @@
 # bop-merge
-![GitHub Release](https://img.shields.io/github/v/release/sco1/bop-merge)
-![GitHub License](https://img.shields.io/github/license/sco1/bop-merge)
+[![GitHub Release](https://img.shields.io/github/v/release/sco1/bop-merge)](https://github.com/sco1/bop-merge/releases)
+[![GitHub License](https://img.shields.io/github/license/sco1/bop-merge)](https://github.com/sco1/bop-merge/blob/main/LICENSE)
 
 `bop-merge` is a helper utility for mirroring your yearly bop playlists into a single collection of bops for you to enjoy.
 
